@@ -20,6 +20,58 @@ from robosuite.environments.factory_sorting.load_factory_sorting_evalization imp
 TRANSPORT_ATTACHMENT_ATTR = "_factory_sorting_transport_attachment"
 
 
+def _assign_indexed_value(array, index, value):
+    value = np.asarray(value, dtype=float)
+    if value.shape == ():
+        array[index] = float(value)
+    else:
+        array[index] = value
+
+
+def capture_gripper_hold_state(env):
+    raw_env = base_robosuite_env(env)
+    robot = raw_env.robots[0]
+    state = []
+    for gripper_joint_names in getattr(robot, "gripper_joints", {}).values():
+        for joint_name in gripper_joint_names:
+            try:
+                qpos_index = raw_env.sim.model.get_joint_qpos_addr(joint_name)
+                qvel_index = raw_env.sim.model.get_joint_qvel_addr(joint_name)
+            except Exception:
+                continue
+            state.append(
+                {
+                    "joint_name": joint_name,
+                    "qpos": np.array(raw_env.sim.data.qpos[qpos_index], dtype=float).copy(),
+                    "qvel": np.array(raw_env.sim.data.qvel[qvel_index], dtype=float).copy(),
+                }
+            )
+    return state
+
+
+def restore_gripper_hold_state(env, state):
+    if not state:
+        return False
+
+    raw_env = base_robosuite_env(env)
+    restored = False
+    for entry in state:
+        joint_name = entry.get("joint_name")
+        try:
+            qpos_index = raw_env.sim.model.get_joint_qpos_addr(joint_name)
+            qvel_index = raw_env.sim.model.get_joint_qvel_addr(joint_name)
+        except Exception:
+            continue
+
+        _assign_indexed_value(raw_env.sim.data.qpos, qpos_index, entry["qpos"])
+        _assign_indexed_value(raw_env.sim.data.qvel, qvel_index, entry["qvel"])
+        restored = True
+
+    if restored:
+        raw_env.sim.forward()
+    return restored
+
+
 def rotate_xy(vec_xy, yaw):
     cos_yaw = math.cos(yaw)
     sin_yaw = math.sin(yaw)
@@ -92,6 +144,7 @@ def capture_transport_attachment(env, object_name):
     relative_xy = rotate_xy(world_delta_xy, -base_yaw)
     base_quat = yaw_quat_wxyz(base_yaw)
     relative_quat = quat_multiply_wxyz(quat_conjugate_wxyz(base_quat), object_qpos[3:7])
+    gripper_hold_state = capture_gripper_hold_state(raw_env)
 
     attachment = {
         "active": True,
@@ -100,13 +153,15 @@ def capture_transport_attachment(env, object_name):
         "relative_xy": relative_xy,
         "world_z": float(object_qpos[2]),
         "relative_quat": relative_quat,
+        "gripper_hold_state": gripper_hold_state,
     }
     setattr(raw_env, TRANSPORT_ATTACHMENT_ATTR, attachment)
     print(
         "transport_attachment_enabled: "
         f"object={object_name}, joint={joint_name}, "
         f"relative_xy={np.round(relative_xy, 4).tolist()}, "
-        f"world_z={float(object_qpos[2]):.6f}"
+        f"world_z={float(object_qpos[2]):.6f}, "
+        f"held_gripper_joints={len(gripper_hold_state)}"
     )
     return attachment
 
@@ -129,6 +184,7 @@ def sync_transport_attachment(env):
         ]
     )
     set_object_qpos(raw_env, attachment["joint_name"], qpos)
+    restore_gripper_hold_state(raw_env, attachment.get("gripper_hold_state"))
     return True
 
 

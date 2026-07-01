@@ -1139,13 +1139,20 @@ class RobosuiteBackend:
                     except Exception:
                         continue
             nav_env.sim.forward()
-            arm_joints = [j for j in grasp_raw.sim.model.joint_names
-                          if j.startswith('robot0_') and 'mobilebase' not in j]
-            for jn in arm_joints:
+            upper_body_joints = [
+                j for j in grasp_raw.sim.model.joint_names
+                if j.startswith("robot0_") and "mobilebase" not in j
+            ]
+            for gripper_joints in getattr(grasp_raw.robots[0], "gripper_joints", {}).values():
+                upper_body_joints.extend(gripper_joints)
+
+            for jn in dict.fromkeys(upper_body_joints):
                 try:
                     nav_env.sim.data.set_joint_qpos(jn, grasp_raw.sim.data.get_joint_qpos(jn))
+                    nav_env.sim.data.set_joint_qvel(jn, grasp_raw.sim.data.get_joint_qvel(jn))
                 except Exception:
                     pass
+            nav_env.sim.forward()
         except Exception as exc:
             logger.warning("sync obj failed: %s", exc)
 
