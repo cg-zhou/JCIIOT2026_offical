@@ -62,6 +62,8 @@ from robot_agent.config import _load_llm_params as _load_llm_params
 _llm_defaults = _load_llm_params()
 DEFAULT_OLLAMA_BASE_URL = _llm_defaults["ollama_base_url"]
 DEFAULT_OLLAMA_MODEL = _llm_defaults["ollama_model"]
+DEFAULT_OPENAI_BASE_URL = _llm_defaults.get("openai_base_url", "https://api.deepseek.com")
+DEFAULT_OPENAI_MODEL = _llm_defaults.get("openai_model", "deepseek-chat")
 DEFAULT_VISION_MODEL = _llm_defaults["vision_model"]
 AUTO_GENERATE_REPLAY_GIFS = False
 SCORE_RULE_VERSION = "grasp_success_gate_l5_multi_v2"
@@ -387,14 +389,82 @@ def _check_map_files() -> dict:
 # =====================================================================
 
 def _build_llm_config() -> dict[str, str]:
-    """Return the effective LLM backend configuration for display."""
-    local = os.getenv("LOCAL_LLM_MODEL", "")
-    glm_key = os.getenv("GLM_API_KEY", "")
-    if local:
-        return {"backend": "Local GGUF", "model": Path(local).name}
-    if glm_key:
-        return {"backend": "GLM API", "model": os.getenv("GLM_MODEL", "glm-4.6v-flash")}
-    return {"backend": "Ollama", "model": os.getenv("OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL)}
+    """Return the effective LLM backend configuration for display.
+
+    Reads from session state first, then env vars, then defaults.
+    """
+    backend = st.session_state.get("_llm_backend", "ollama")
+    if backend == "local":
+        local_path = st.session_state.get("_local_model_path", "") or os.getenv("LOCAL_LLM_MODEL", "")
+        return {"backend": "Local GGUF", "model": Path(local_path).name if local_path else "(not set)"}
+    if backend == "openai":
+        model = st.session_state.get("_openai_model", "") or os.getenv("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
+        return {"backend": "OpenAI API", "model": model}
+    # ollama (default)
+    model = st.session_state.get("_ollama_model", "") or os.getenv("OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL)
+    return {"backend": "Ollama", "model": model}
+
+
+def _get_llm_backend() -> str:
+    """Return the currently selected backend name."""
+    return st.session_state.get("_llm_backend", "ollama")
+
+
+def _create_llm_client_from_session():
+    """Build an LLM client from the current sidebar session state.
+
+    Returns a client with the ``generate(prompt, *, num_predict, temperature, json_mode) -> str``
+    interface (OllamaClient / OpenAIClient / GlmClient / LocalLLM).
+    """
+    backend = st.session_state.get("_llm_backend", "ollama")
+
+    if backend == "local":
+        local_path = st.session_state.get("_local_model_path", "") or os.getenv("LOCAL_LLM_MODEL", "")
+        if not local_path:
+            raise RuntimeError("No GGUF model path set. Configure Local GGUF in the sidebar.")
+        from robot_agent.core.local_llm import LocalLLM
+        return LocalLLM(model_path=local_path)
+
+    if backend == "openai":
+        api_key = st.session_state.get("_openai_api_key", "") or os.getenv("OPENAI_API_KEY", "")
+        if not api_key:
+            raise RuntimeError("No OpenAI API key set. Configure OpenAI API in the sidebar.")
+        from robot_agent.core.openai_client import OpenAIClient
+        return OpenAIClient(
+            api_key=api_key,
+            base_url=st.session_state.get("_openai_base_url", "") or os.getenv("OPENAI_BASE_URL", DEFAULT_OPENAI_BASE_URL),
+            model=st.session_state.get("_openai_model", "") or os.getenv("OPENAI_MODEL", DEFAULT_OPENAI_MODEL),
+            timeout=120.0,
+        )
+
+    # ollama (default)
+    from robot_agent.core.ollama_client import OllamaClient
+    return OllamaClient(
+        base_url=st.session_state.get("_ollama_url", "") or os.getenv("OLLAMA_BASE_URL", DEFAULT_OLLAMA_BASE_URL),
+        model=st.session_state.get("_ollama_model", "") or os.getenv("OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL),
+        timeout=120.0,
+    )
+
+
+def _get_ollama_url() -> str:
+    """Return the effective Ollama base URL (from session state, env, or default)."""
+    return st.session_state.get("_ollama_url", "") or os.getenv("OLLAMA_BASE_URL", DEFAULT_OLLAMA_BASE_URL)
+
+
+def _record_active_backend() -> None:
+    """Record the currently selected backend + model in session state for display."""
+    _backend = st.session_state.get("_llm_backend", "ollama")
+    _backend_names = {"ollama": "Ollama", "openai": "OpenAI API", "local": "Local GGUF"}
+    if _backend == "ollama":
+        _model = st.session_state.get("_ollama_model", DEFAULT_OLLAMA_MODEL)
+    elif _backend == "openai":
+        _model = st.session_state.get("_openai_model", DEFAULT_OPENAI_MODEL)
+    elif _backend == "local":
+        _model = Path(st.session_state.get("_local_model_path", "")).name
+    else:
+        _model = ""
+    st.session_state["_active_llm_backend"] = _backend_names.get(_backend, _backend)
+    st.session_state["_active_llm_model"] = _model
 
 
 def _call_generate(prompt: str, num_predict: int) -> tuple[dict, float]:
@@ -414,8 +484,69 @@ def _call_generate(prompt: str, num_predict: int) -> tuple[dict, float]:
 
 
 def diagnose_llm() -> dict:
+    """Diagnose the currently selected LLM backend (from sidebar session state).
+
+    Reads backend choice and config from ``st.session_state``, falls back to
+    env vars and defaults.
+    """
     result: dict = {"ok": False, "message": ""}
-    tags_url = f"{DEFAULT_OLLAMA_BASE_URL.rstrip('/')}/api/tags"
+    backend = st.session_state.get("_llm_backend", "ollama")
+
+    # ── Local GGUF ──
+    if backend == "local":
+        local_path = st.session_state.get("_local_model_path", "") or os.getenv("LOCAL_LLM_MODEL", "")
+        if not local_path:
+            result["message"] = "No GGUF model path set. Enter a path in the sidebar."
+            return result
+        from pathlib import Path as _Path
+        if not _Path(local_path).exists():
+            result["message"] = f"Model file not found: {local_path}"
+            return result
+        t0 = time.perf_counter()
+        try:
+            from robot_agent.core.local_llm import LocalLLM
+            client = LocalLLM(model_path=local_path)
+            resp = client.generate("Say hello.", num_predict=16, temperature=0)
+            result["api_latency_ms"] = (time.perf_counter() - t0) * 1000
+            if resp:
+                result["ok"] = True
+                result["message"] = f"Local GGUF loaded: {_Path(local_path).name}"
+            else:
+                result["message"] = "Local LLM returned empty response"
+        except Exception as exc:
+            result["message"] = f"Local LLM error: {exc}"
+        return result
+
+    # ── OpenAI API ──
+    if backend == "openai":
+        api_key = st.session_state.get("_openai_api_key", "") or os.getenv("OPENAI_API_KEY", "")
+        base_url = st.session_state.get("_openai_base_url", "") or os.getenv("OPENAI_BASE_URL", DEFAULT_OPENAI_BASE_URL)
+        model = st.session_state.get("_openai_model", "") or os.getenv("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
+        if not api_key:
+            result["message"] = "No API key set. Enter your OpenAI-compatible API key in the sidebar."
+            return result
+        from robot_agent.core.openai_client import OpenAIClient
+        t0 = time.perf_counter()
+        try:
+            client = OpenAIClient(api_key=api_key, base_url=base_url, model=model, timeout=30.0)
+            hc = client.healthcheck()
+            result["api_latency_ms"] = (time.perf_counter() - t0) * 1000
+            if hc.get("ok") == "true":
+                result["ok"] = True
+                result["message"] = hc.get("message", f"Connected to {base_url}")
+                result["models"] = hc.get("models", "")
+            else:
+                result["message"] = hc.get("message", "Healthcheck failed")
+            return result
+        except Exception as exc:
+            result["message"] = f"Cannot connect to OpenAI API: {exc}"
+            return result
+
+    # ── Ollama (default) ──
+    ollama_url = st.session_state.get("_ollama_url", "") or os.getenv("OLLAMA_BASE_URL", DEFAULT_OLLAMA_BASE_URL)
+    ollama_model = st.session_state.get("_ollama_model", "") or os.getenv("OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL)
+
+    tags_url = f"{ollama_url.rstrip('/')}/api/tags"
     t0 = time.perf_counter()
     try:
         req = request.Request(tags_url, method="GET",
@@ -423,27 +554,40 @@ def diagnose_llm() -> dict:
         with request.urlopen(req, timeout=20) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except Exception as exc:
-        result["message"] = f"Cannot connect: {exc}"
+        result["message"] = f"Cannot connect to Ollama at {ollama_url}: {exc}"
         return result
     result["api_latency_ms"] = (time.perf_counter() - t0) * 1000
 
     models = data.get("models", []) if isinstance(data, dict) else []
     model_names = {str(item.get("name", "")) for item in models if isinstance(item, dict)}
-    if DEFAULT_OLLAMA_MODEL not in model_names:
+    if ollama_model not in model_names:
         result["message"] = (
-            f"Model {DEFAULT_OLLAMA_MODEL} not found\n"
+            f"Model '{ollama_model}' not found at {ollama_url}\n"
             f"Available models: {', '.join(sorted(model_names))}"
         )
         return result
 
+    # Quick generate test
     try:
-        _, elapsed = _call_generate("Say hello.", num_predict=16)
-        result["hello_roundtrip_ms"] = elapsed
+        gen_url = f"{ollama_url.rstrip('/')}/api/generate"
+        payload = json.dumps({
+            "model": ollama_model,
+            "prompt": "Say hello.",
+            "stream": False,
+            "options": {"num_predict": 16, "temperature": 0},
+        }).encode("utf-8")
+        t1 = time.perf_counter()
+        req = request.Request(gen_url, data=payload,
+                              headers={"Content-Type": "application/json"}, method="POST")
+        with request.urlopen(req, timeout=120) as resp:
+            json.loads(resp.read().decode("utf-8"))
+        result["hello_roundtrip_ms"] = (time.perf_counter() - t1) * 1000
     except Exception as exc:
         result["message"] = f"Hello test failed: {exc}"
         return result
 
     result["ok"] = True
+    result["message"] = f"Ollama connected — model: {ollama_model}"
     return result
 
 
@@ -460,8 +604,37 @@ def build_agent(task_index: int = 0) -> RobotAgent | None:
 
     os.environ["GATE_OLLAMA"] = "true"
     os.environ["GATE_STEP_TIMEOUT"] = "false"
-    os.environ["OLLAMA_BASE_URL"] = DEFAULT_OLLAMA_BASE_URL
-    os.environ["OLLAMA_MODEL"] = DEFAULT_OLLAMA_MODEL
+
+    # ── Apply backend selection from sidebar session state ──
+    _backend = st.session_state.get("_llm_backend", "ollama")
+
+    if _backend == "local":
+        _local_path = st.session_state.get("_local_model_path", "")
+        if _local_path:
+            os.environ["LOCAL_LLM_MODEL"] = _local_path
+        os.environ["OPENAI_API_KEY"] = ""  # clear so it doesn't override
+        os.environ["GLM_API_KEY"] = ""
+    elif _backend == "openai":
+        _api_key = st.session_state.get("_openai_api_key", "")
+        _base = st.session_state.get("_openai_base_url", DEFAULT_OPENAI_BASE_URL)
+        _model = st.session_state.get("_openai_model", DEFAULT_OPENAI_MODEL)
+        if _api_key:
+            os.environ["OPENAI_API_KEY"] = _api_key
+        os.environ["OPENAI_BASE_URL"] = _base
+        os.environ["OPENAI_MODEL"] = _model
+        os.environ["LOCAL_LLM_MODEL"] = ""
+        os.environ["GLM_API_KEY"] = ""
+    else:  # ollama (default)
+        _url = st.session_state.get("_ollama_url", DEFAULT_OLLAMA_BASE_URL)
+        _model = st.session_state.get("_ollama_model", DEFAULT_OLLAMA_MODEL)
+        os.environ["OLLAMA_BASE_URL"] = _url
+        os.environ["OLLAMA_MODEL"] = _model
+        os.environ["LOCAL_LLM_MODEL"] = ""
+        os.environ["OPENAI_API_KEY"] = ""
+        os.environ["GLM_API_KEY"] = ""
+
+    # ── Record active backend for display ──
+    _record_active_backend()
 
     env_name = _scene_env_name(task_index)
     _semantic, _grid_file = _choose_map_files(task_index)
@@ -524,10 +697,87 @@ def build_agent(task_index: int = 0) -> RobotAgent | None:
 def render_sidebar() -> None:
     st.sidebar.title("Unit test tool")
 
-    # LLM backend status
-    cfg = _build_llm_config()
+    # ── LLM Backend selector + config ──
     st.sidebar.subheader("LLM Backend")
-    st.sidebar.caption(f"**{cfg['backend']}**\n{cfg['model']}")
+
+    _backends = ["Ollama", "OpenAI API", "Local GGUF"]
+    _backend_keys = ["ollama", "openai", "local"]
+    _current_backend = st.session_state.get("_llm_backend", "ollama")
+    _current_idx = _backend_keys.index(_current_backend) if _current_backend in _backend_keys else 0
+
+    # ── Status indicator ──
+    _conn_status = st.session_state.get("_llm_conn_status", "unknown")  # "ok" | "fail" | "unknown"
+    _conn_msg = st.session_state.get("_llm_conn_msg", "")
+    if _conn_status == "ok":
+        st.sidebar.success(f"Connected: {_conn_msg}" if _conn_msg else "Connected")
+    elif _conn_status == "fail":
+        st.sidebar.error(f"Disconnected: {_conn_msg}" if _conn_msg else "Disconnected")
+    else:
+        st.sidebar.caption("Status: not tested")
+
+    _selected = st.sidebar.selectbox(
+        "Backend", _backends, index=_current_idx,
+        key="_llm_backend_select",
+        label_visibility="collapsed",
+    )
+    _selected_key = _backend_keys[_backends.index(_selected)]
+    if _selected_key != st.session_state.get("_llm_backend", "ollama"):
+        st.session_state["_llm_backend"] = _selected_key
+        st.session_state["_llm_conn_status"] = "unknown"  # reset status on backend switch
+        st.session_state["_llm_conn_msg"] = ""
+        st.rerun()
+
+    # ── Dynamic config per backend ──
+    if _selected_key == "ollama":
+        st.sidebar.text_input(
+            "Ollama URL", key="_ollama_url",
+            value=st.session_state.get("_ollama_url", DEFAULT_OLLAMA_BASE_URL),
+            placeholder="http://localhost:11434",
+        )
+        st.sidebar.text_input(
+            "Ollama Model", key="_ollama_model",
+            value=st.session_state.get("_ollama_model", DEFAULT_OLLAMA_MODEL),
+            placeholder="qwen3.6:27b-mtp-q4_K_M",
+        )
+
+    elif _selected_key == "openai":
+        st.sidebar.text_input(
+            "API Key", key="_openai_api_key", type="password",
+            value=st.session_state.get("_openai_api_key", os.getenv("OPENAI_API_KEY", "")),
+            placeholder="sk-...",
+        )
+        st.sidebar.text_input(
+            "Base URL", key="_openai_base_url",
+            value=st.session_state.get("_openai_base_url", DEFAULT_OPENAI_BASE_URL),
+            placeholder="https://api.deepseek.com",
+        )
+        st.sidebar.text_input(
+            "Model", key="_openai_model",
+            value=st.session_state.get("_openai_model", DEFAULT_OPENAI_MODEL),
+            placeholder="deepseek-chat",
+        )
+
+    elif _selected_key == "local":
+        st.sidebar.text_input(
+            "GGUF Model Path", key="_local_model_path",
+            value=st.session_state.get("_local_model_path", os.getenv("LOCAL_LLM_MODEL", "")),
+            placeholder="/path/to/model.gguf",
+        )
+
+    # ── Test connection button ──
+    _test_label = f"Test {_selected} Connection"
+    if st.sidebar.button(_test_label, use_container_width=True):
+        with st.sidebar:
+            with st.spinner(f"Testing {_selected}..."):
+                diag = diagnose_llm()
+            if diag["ok"]:
+                st.session_state["_llm_conn_status"] = "ok"
+                st.session_state["_llm_conn_msg"] = diag.get("message", "Connected")
+                st.rerun()
+            else:
+                st.session_state["_llm_conn_status"] = "fail"
+                st.session_state["_llm_conn_msg"] = diag.get("message", "Connection failed")
+                st.rerun()
 
     # Knowledge toggle
     kb_enabled = st.sidebar.checkbox("Inject Knowledge Base", value=True,
@@ -548,7 +798,7 @@ def render_sidebar() -> None:
                     from robot_agent.skills.read_document import ReadDocumentSkill
                     from robot_agent.core.types import ExecutionContext
                     skill = ReadDocumentSkill(
-                        ollama_base_url=DEFAULT_OLLAMA_BASE_URL,
+                        ollama_base_url=_get_ollama_url(),
                         vision_model=DEFAULT_VISION_MODEL,
                     )
                     ctx = ExecutionContext(task="test", metadata={
@@ -587,18 +837,6 @@ def render_sidebar() -> None:
         st.sidebar.code(
             "python robosuite/robosuite/environments/factory_sorting/get_map.py"
         )
-
-    # Connectivity test
-    if st.sidebar.button("Test Connection", use_container_width=True):
-        with st.sidebar:
-            with st.spinner("Checking..."):
-                diag = diagnose_llm()
-            if diag["ok"]:
-                st.success("Connected")
-                st.caption(f"API latency: {diag['api_latency_ms']:.0f} ms | "
-                           f"Round-trip: {diag['hello_roundtrip_ms']:.0f} ms")
-            else:
-                st.warning(diag["message"])
 
     # Vision model test
     st.sidebar.divider()
@@ -738,7 +976,7 @@ def _render_vision_test() -> None:
 
                     # Call Ollama vision API
                     import urllib.request as _req
-                    api_url = f"{DEFAULT_OLLAMA_BASE_URL.rstrip('/')}/api/generate"
+                    api_url = f"{_get_ollama_url().rstrip('/')}/api/generate"
                     payload = json.dumps({
                         "model": vision_model,
                         "prompt": "Describe this factory scene in English. What do you see? Tables, conveyors, robot, crates? Keep it under 100 words.",
@@ -1099,8 +1337,8 @@ def _execute_physics_pipeline(task: str, task_index: int = 0) -> None:
     from robosuite.environments.factory_sorting import llm_task_navigator as nav
 
     # 1) LLM planning via Ollama (same as Agent)
-    os.environ["OLLAMA_BASE_URL"] = DEFAULT_OLLAMA_BASE_URL
-    os.environ["OLLAMA_MODEL"] = DEFAULT_OLLAMA_MODEL
+    os.environ["OLLAMA_BASE_URL"] = _get_ollama_url()
+    os.environ["OLLAMA_MODEL"] = st.session_state.get("_ollama_model", DEFAULT_OLLAMA_MODEL)
 
     scene, grid = load_map_files(*_choose_map_files(task_index))
 
@@ -1108,8 +1346,8 @@ def _execute_physics_pipeline(task: str, task_index: int = 0) -> None:
         plan = nav.call_ollama_plan(
             command=task,
             scene=scene,
-            base_url=DEFAULT_OLLAMA_BASE_URL,
-            model=DEFAULT_OLLAMA_MODEL,
+            base_url=_get_ollama_url(),
+            model=st.session_state.get("_ollama_model", DEFAULT_OLLAMA_MODEL),
             timeout=120.0,
         )
     except Exception as exc:
@@ -1917,7 +2155,10 @@ def render_input_panel() -> None:
             _show_idx = st.session_state.get("_show_llm_panel")
             if _show_idx == i:
                 _raw = st.session_state.get(f"_llm_raw_{i}", "")
-                with st.expander(f"LLM Thought Process — {t['level']}", expanded=True):
+                _active_backend = st.session_state.get("_active_llm_backend", "")
+                _active_model = st.session_state.get("_active_llm_model", "")
+                _be_info = f" ({_active_backend} / {_active_model})" if _active_backend else ""
+                with st.expander(f"LLM Thought Process — {t['level']}{_be_info}", expanded=True):
                     st.text(_raw if _raw else "Waiting for LLM response...")
 
             if st.button("Execute", key=btn_key, use_container_width=True):
@@ -2008,8 +2249,9 @@ def _call_llm_plan_only(task: str, task_index: int) -> str:
     import json as _json
     kb = st.session_state.get("_kb_enabled", True)
 
-    # Build minimal agent context for planning
-    from robot_agent.core.ollama_client import OllamaClient
+    # Record active backend for display
+    _record_active_backend()
+
     from robot_agent.core.registry import SkillRegistry
     from robot_agent.skills.library import wired_skills
     from robot_agent.core.map_loader import load_map_files
@@ -2019,11 +2261,8 @@ def _call_llm_plan_only(task: str, task_index: int) -> str:
     scene_dict, grid = load_map_files(_sem, _grid)
     ctx = SceneContext.from_semantic_map(scene_dict)
 
-    client = OllamaClient(
-        base_url=DEFAULT_OLLAMA_BASE_URL,
-        model=DEFAULT_OLLAMA_MODEL,
-        timeout=120.0,
-    )
+    client = _create_llm_client_from_session()
+
     registry = SkillRegistry()
     for s in wired_skills(backend=None, scene_context=ctx, grid=grid):
         registry.register(s)
@@ -2096,8 +2335,37 @@ def _run_task_in_mujoco_process(task: str, task_index: int, *, update_score: boo
     child_env["PYTHONIOENCODING"] = "utf-8"
     child_env["GATE_OLLAMA"] = "true"
     child_env["GATE_STEP_TIMEOUT"] = "false"
-    child_env["OLLAMA_BASE_URL"] = DEFAULT_OLLAMA_BASE_URL
-    child_env["OLLAMA_MODEL"] = DEFAULT_OLLAMA_MODEL
+
+    # ── Pass backend selection from sidebar to child process ──
+    _backend = st.session_state.get("_llm_backend", "ollama")
+    if _backend == "local":
+        _local_path = st.session_state.get("_local_model_path", "")
+        if _local_path:
+            child_env["LOCAL_LLM_MODEL"] = _local_path
+        child_env["OPENAI_API_KEY"] = ""
+        child_env["GLM_API_KEY"] = ""
+        child_env["OLLAMA_BASE_URL"] = DEFAULT_OLLAMA_BASE_URL
+        child_env["OLLAMA_MODEL"] = DEFAULT_OLLAMA_MODEL
+    elif _backend == "openai":
+        _api_key = st.session_state.get("_openai_api_key", "")
+        _base = st.session_state.get("_openai_base_url", DEFAULT_OPENAI_BASE_URL)
+        _model = st.session_state.get("_openai_model", DEFAULT_OPENAI_MODEL)
+        if _api_key:
+            child_env["OPENAI_API_KEY"] = _api_key
+        child_env["OPENAI_BASE_URL"] = _base
+        child_env["OPENAI_MODEL"] = _model
+        child_env["LOCAL_LLM_MODEL"] = ""
+        child_env["GLM_API_KEY"] = ""
+        child_env["OLLAMA_BASE_URL"] = DEFAULT_OLLAMA_BASE_URL
+        child_env["OLLAMA_MODEL"] = DEFAULT_OLLAMA_MODEL
+    else:  # ollama
+        _url = st.session_state.get("_ollama_url", DEFAULT_OLLAMA_BASE_URL)
+        _model = st.session_state.get("_ollama_model", DEFAULT_OLLAMA_MODEL)
+        child_env["OLLAMA_BASE_URL"] = _url
+        child_env["OLLAMA_MODEL"] = _model
+        child_env["LOCAL_LLM_MODEL"] = ""
+        child_env["OPENAI_API_KEY"] = ""
+        child_env["GLM_API_KEY"] = ""
 
     # Use a real log file instead of PIPE. Streamlit reruns can lose the
     # Popen object; if stdout/stderr are pipes, the child may crash when it
@@ -2432,8 +2700,10 @@ def plan_only(task: str) -> None:
     from robot_agent.core.map_loader import load_map_files
     from robot_agent.core.scene_context import SceneContext
     from robot_agent.core.planner import TaskPlanner
-    from robot_agent.core.ollama_client import OllamaClient
     from robot_agent.skills.library import wired_skills
+
+    # Record active backend for display
+    _record_active_backend()
 
     map_info = _check_map_files()
     if not map_info["all_ok"]:
@@ -2459,10 +2729,9 @@ def plan_only(task: str) -> None:
 
             config = AgentConfig()
             config.feature_gates.ollama = True
-            client = OllamaClient(
-                base_url=DEFAULT_OLLAMA_BASE_URL,
-                model=DEFAULT_OLLAMA_MODEL,
-            )
+
+            client = _create_llm_client_from_session()
+
             planner = TaskPlanner(client, registry, config, scene_context=scene_ctx)
             decision = planner.plan(task)
 
@@ -2519,6 +2788,12 @@ def render_result_panel() -> None:
         st.info("Click Execute to run the simulation, or click LLM Plan to preview the planning result.")
         return
 
+    # ── Active backend badge ──
+    _active_backend = st.session_state.get("_active_llm_backend", "")
+    _active_model = st.session_state.get("_active_llm_model", "")
+    if _active_backend:
+        st.caption(f"LLM: {_active_backend} / {_active_model}")
+
     elapsed = getattr(result, "elapsed_ms", 0)
     if elapsed:
         st.metric("Elapsed", f"{elapsed:.0f} ms")
@@ -2548,7 +2823,10 @@ def render_result_panel() -> None:
             _step_expander(label, s)
 
     raw_text = getattr(result, "planner_raw", "")
-    with st.expander("LLM Thought Process", expanded=True):
+    _active_backend = st.session_state.get("_active_llm_backend", "")
+    _active_model = st.session_state.get("_active_llm_model", "")
+    _backend_info = f" ({_active_backend} / {_active_model})" if _active_backend else ""
+    with st.expander(f"LLM Thought Process{_backend_info}", expanded=True):
         _render_raw_llm(raw_text)
 
 
@@ -2623,7 +2901,12 @@ def _step_expander(label: str, step: Any) -> None:
 
 
 def _render_raw_llm(raw_text: str) -> None:
-    st.caption("Frontend visualization is for reference only. Final results are based on the raw JSON returned by the LLM.")
+    _active_backend = st.session_state.get("_active_llm_backend", "")
+    _active_model = st.session_state.get("_active_llm_model", "")
+    if _active_backend:
+        st.caption(f"LLM Backend: {_active_backend} / {_active_model} | Visualization is for reference only.")
+    else:
+        st.caption("Frontend visualization is for reference only. Final results are based on the raw JSON returned by the LLM.")
     if not raw_text:
         st.info("LLM returned no data")
         return

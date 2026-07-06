@@ -41,6 +41,7 @@ class FeatureGates:
 
     # ── LLM 后端 ──────────────────────────────────────────
     ollama: bool = field(default_factory=lambda: _gate("GATE_OLLAMA"))
+    openai: bool = field(default_factory=lambda: _gate("GATE_OPENAI"))
 
     # ── 任务规划 ──────────────────────────────────────────
     planner: bool = field(default_factory=lambda: _gate("GATE_PLANNER"))
@@ -59,6 +60,7 @@ class FeatureGates:
         """返回所有开关的 dict，便于调试和展示。"""
         return {
             "ollama": self.ollama,
+            "openai": self.openai,
             "planner": self.planner,
             "step_retry": self.step_retry,
             "step_timeout": self.step_timeout,

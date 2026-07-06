@@ -25,9 +25,10 @@ def _build_llm_client(config):
     """Auto-select the LLM backend based on environment variables.
 
     Priority:
-    1. LOCAL_LLM_MODEL  → local GGUF file (llama-cpp-python)
-    2. GLM_API_KEY       → Zhipu GLM cloud API
-    3. GATE_OLLAMA=true  → Ollama server (default)
+    1. LOCAL_LLM_MODEL   → local GGUF file (llama-cpp-python)
+    2. OPENAI_API_KEY    → OpenAI-compatible cloud API (DeepSeek, GLM, etc.)
+    3. GLM_API_KEY       → Zhipu GLM cloud API (legacy, kept for compatibility)
+    4. GATE_OLLAMA=true  → Ollama server (default)
     """
     import logging
     _log = logging.getLogger(__name__)
@@ -39,14 +40,26 @@ def _build_llm_client(config):
         from robot_agent.core.local_llm import LocalLLM
         return LocalLLM(model_path=local_path)
 
-    # 2) GLM cloud API
+    # 2) OpenAI-compatible cloud API (DeepSeek, Zhipu GLM, OpenAI, etc.)
+    openai_key = _os.getenv("OPENAI_API_KEY", "") or config.openai_api_key
+    if openai_key:
+        _log.info("Using OpenAI-compatible API: %s / %s", config.openai_base_url, config.openai_model)
+        from robot_agent.core.openai_client import OpenAIClient
+        return OpenAIClient(
+            api_key=openai_key,
+            base_url=config.openai_base_url,
+            model=config.openai_model,
+            timeout=config.openai_timeout,
+        )
+
+    # 3) GLM cloud API (legacy direct path)
     glm_key = _os.getenv("GLM_API_KEY", "")
     if glm_key:
-        _log.info("Using GLM API")
+        _log.info("Using GLM API (legacy)")
         from robot_agent.core.glm_client import GlmClient
         return GlmClient(api_key=glm_key)
 
-    # 3) Ollama (default)
+    # 4) Ollama (default)
     if config.feature_gates.ollama:
         _log.info("Using Ollama: %s / %s", config.ollama_base_url, config.ollama_model)
         return OllamaClient(
@@ -58,6 +71,7 @@ def _build_llm_client(config):
     raise RuntimeError(
         "No LLM backend configured. Set one of:\n"
         "  LOCAL_LLM_MODEL=/path/to/model.gguf\n"
+        "  OPENAI_API_KEY=sk-...  (+ OPENAI_BASE_URL / OPENAI_MODEL)\n"
         "  GLM_API_KEY=your-key\n"
         "  GATE_OLLAMA=true + OLLAMA_BASE_URL=http://..."
     )
@@ -88,10 +102,20 @@ class RobotAgent:
     planner: TaskPlanner = field(init=False)
 
     def __post_init__(self) -> None:
-        if not self.config.feature_gates.ollama:
+        # Verify at least one LLM backend is configured
+        _has_llm = (
+            _os.getenv("LOCAL_LLM_MODEL", "")
+            or _os.getenv("OPENAI_API_KEY", "") or self.config.openai_api_key
+            or _os.getenv("GLM_API_KEY", "")
+            or self.config.feature_gates.ollama
+        )
+        if not _has_llm:
             raise RuntimeError(
-                "LLM backend is required. Set GATE_OLLAMA=true and configure "
-                "Ollama before starting the agent."
+                "No LLM backend configured. Set one of:\n"
+                "  LOCAL_LLM_MODEL=/path/to/model.gguf\n"
+                "  OPENAI_API_KEY=sk-...\n"
+                "  GLM_API_KEY=your-key\n"
+                "  GATE_OLLAMA=true + OLLAMA_BASE_URL=http://..."
             )
         if self.backend is None:
             raise RuntimeError("backend is required. Pass a RobosuiteBackend (or MockBackend for tests).")

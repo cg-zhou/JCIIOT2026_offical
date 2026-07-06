@@ -25,6 +25,8 @@ def _load_llm_params() -> dict:
         "ollama_base_url": "http://localhost:11434",
         "ollama_model": "qwen3.6:27b-mtp-q4_K_M",
         "vision_model": "qwen3-vl:8b",
+        "openai_base_url": "https://api.deepseek.com",
+        "openai_model": "deepseek-chat",
     }
     try:
         if _path.exists():
@@ -75,6 +77,22 @@ class AgentConfig:
     )
     ollama_timeout: float = field(
         default_factory=lambda: _float_env("OLLAMA_TIMEOUT", 120.0)
+    )
+
+    # ── OpenAI-compatible API ──────────────────────────────
+    openai_api_key: str = field(
+        default_factory=lambda: os.getenv("OPENAI_API_KEY", "")
+    )
+    openai_base_url: str = field(
+        default_factory=lambda: os.getenv("OPENAI_BASE_URL")
+        or _load_llm_params()["openai_base_url"]
+    )
+    openai_model: str = field(
+        default_factory=lambda: os.getenv("OPENAI_MODEL")
+        or _load_llm_params()["openai_model"]
+    )
+    openai_timeout: float = field(
+        default_factory=lambda: _float_env("OPENAI_TIMEOUT", 120.0)
     )
 
     # ── Planner ───────────────────────────────────────────

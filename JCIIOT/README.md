@@ -213,15 +213,26 @@ The platform uses two MuJoCo camera views, which can be switched in the replay p
 > After modifying this file, **restart `app.py`** for the changes to take effect. No `.py` code needs to be changed.
 > All numeric parameters are validated against safety ranges. Values outside the range will be automatically clamped and a warning will be printed.
 
-### `llm` — Large Model Configuration (3 parameters)
+### `llm` — Large Model Configuration
 
 Controls access to the large models used for task planning and visual understanding. Parameters take effect through `config.py` -> `AgentConfig` and `app.py`. **Environment variables have higher priority than this file**.
 
-| Parameter           | Type   | Default Value                                                     | Meaning                                                                    |
-| ------------------- | ------ | ----------------------------------------------------------------- | -------------------------------------------------------------------------- |
-| `ollama_base_url`   | string | `"http://localhost:11434"` | Ollama service address. It can be changed to a local address such as `http://localhost:11434` or another remote server. |
-| `ollama_model`      | string | `"qwen3.6:27b-mtp-q4_K_M"`                                      | Text reasoning model name, used for task planning and step decisions.      |
-| `vision_model`      | string | `"qwen3-vl:8b"`                                                 | Visual understanding model name, used for SOP document image analysis and scene observation. |
+#### Ollama (default)
+
+| Parameter         | Type   | Default                            | Meaning                                                                |
+| ----------------- | ------ | ---------------------------------- | ---------------------------------------------------------------------- |
+| `ollama_base_url` | string | `"http://localhost:11434"`         | Ollama service address.                                                |
+| `ollama_model`    | string | `"qwen3.6:27b-mtp-q4_K_M"`        | Text model for task planning.                                          |
+| `vision_model`    | string | `"qwen3-vl:8b"`                    | Vision model for SOP document image analysis.                          |
+
+#### OpenAI-Compatible API (DeepSeek, Zhipu GLM, etc.)
+
+| Parameter         | Type   | Default                         | Meaning                                                                |
+| ----------------- | ------ | ------------------------------- | ---------------------------------------------------------------------- |
+| `openai_base_url` | string | `"https://api.deepseek.com"`    | OpenAI-compatible API endpoint.                                        |
+| `openai_model`    | string | `"deepseek-chat"`               | Model name to use for planning.                                        |
+
+Environment variables (`OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`) override these defaults.
 
 ### `navigation` — Navigation Parameters (12 parameters)
 
@@ -309,11 +320,39 @@ pip install -e .
 streamlit run app.py
 ```
 
-Optional environment variables:
+### LLM Backend Configuration
+
+The sidebar provides a **backend selector** to switch between LLM providers:
+
+| Backend        | Configuration                                  | Example                                  |
+| -------------- | ---------------------------------------------- | ---------------------------------------- |
+| **Ollama**     | URL + Model name                               | `http://localhost:11434` / `qwen3.6`     |
+| **OpenAI API** | API Key + Base URL + Model                     | DeepSeek, Zhipu GLM, OpenAI, vLLM, etc.  |
+| **Local GGUF** | Path to `.gguf` file                           | `C:\models\qwen3.gguf`                   |
+
+Click **"Test Connection"** to verify — a persistent status indicator (green = connected, red = failed) is shown at the top of the sidebar. During task execution, the active backend and model are displayed in the results panel and LLM Thought Process expander.
+
+### Environment Variables (optional)
+
+All settings can also be configured via environment variables:
 
 ```bash
+# Ollama
 set OLLAMA_BASE_URL=http://your-server:11434
 set OLLAMA_MODEL=qwen3.6:27b
+
+# OpenAI-compatible API (DeepSeek, Zhipu GLM, etc.)
+set OPENAI_API_KEY=sk-your-api-key
+set OPENAI_BASE_URL=https://api.deepseek.com
+set OPENAI_MODEL=deepseek-chat
+
+# Zhipu GLM example
+set OPENAI_API_KEY=your-glm-key
+set OPENAI_BASE_URL=https://open.bigmodel.cn/api/paas/v4
+set OPENAI_MODEL=glm-4.7
+
+# Local GGUF model
+set LOCAL_LLM_MODEL=C:\models\qwen3.gguf
 ```
 
 ---

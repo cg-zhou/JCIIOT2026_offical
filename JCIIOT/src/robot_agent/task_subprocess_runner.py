@@ -98,6 +98,8 @@ def _build_agent(app_dir: Path, task_index: int, knowledge_enabled: bool = True)
     _llm = _load_llm()
     os.environ.setdefault("OLLAMA_BASE_URL", _llm["ollama_base_url"])
     os.environ.setdefault("OLLAMA_MODEL", _llm["ollama_model"])
+    os.environ.setdefault("OPENAI_BASE_URL", _llm.get("openai_base_url", "https://api.deepseek.com"))
+    os.environ.setdefault("OPENAI_MODEL", _llm.get("openai_model", "deepseek-chat"))
 
     env_name = _scene_env_name(task_index)
     semantic, grid_file = _choose_map_files(app_dir, task_index)
