@@ -332,6 +332,45 @@ The sidebar provides a **backend selector** to switch between LLM providers:
 
 Click **"Test Connection"** to verify — a persistent status indicator (green = connected, red = failed) is shown at the top of the sidebar. During task execution, the active backend and model are displayed in the results panel and LLM Thought Process expander.
 
+### VLM (Vision Language Model) Configuration
+
+The sidebar **Vision Model (VLM)** section provides independent configuration for multimodal models used in document image analysis:
+
+| Field | Description | Example |
+|-------|-------------|---------|
+| **VLM Base URL** | API endpoint | `http://localhost:11434` (Ollama) or `https://open.bigmodel.cn/api/paas/v4` (Zhipu) |
+| **VLM API Key** | API key (leave empty for Ollama) | `sk-...` |
+| **VLM Model** | Model name | `qwen3-vl:8b` / `gpt-4o` / `glm-4.6v` |
+
+- **Status indicator** shows connection state (Connected / Disconnected / not tested).
+- **"Test VLM with Factory Scene"** button loads the MuJoCo simulation, captures a birdview frame, sends it to the VLM, and displays both the image and the model's description.
+- If VLM fields are left empty, the system falls back to the text LLM backend configuration or defaults to Ollama.
+
+#### Using OpenAI-compatible VLM in skills
+
+```python
+from robot_agent.core.vision_client import ask_vision
+
+# Ollama (default)
+response = ask_vision(prompt, image_bytes,
+                      base_url="http://localhost:11434",
+                      model="qwen3-vl:8b")
+
+# OpenAI-compatible (Zhipu GLM, GPT-4o, etc.)
+response = ask_vision(prompt, image_bytes,
+                      base_url="https://open.bigmodel.cn/api/paas/v4",
+                      model="glm-4.6v",
+                      api_type="openai",
+                      api_key="your-api-key")
+
+# Auto-detect API type from URL
+from robot_agent.core.vision_client import ask_vision_auto
+response = ask_vision_auto(prompt, image_bytes,
+                           base_url="https://api.deepseek.com",
+                           model="deepseek-chat",
+                           api_key="sk-...")
+```
+
 ### Environment Variables (optional)
 
 All settings can also be configured via environment variables:
@@ -353,6 +392,11 @@ set OPENAI_MODEL=glm-4.7
 
 # Local GGUF model
 set LOCAL_LLM_MODEL=C:\models\qwen3.gguf
+
+# VLM (Vision Language Model) — independent of text LLM backend
+set VLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4
+set VLM_API_KEY=your-api-key
+set VLM_MODEL=glm-4.6v
 ```
 
 ---
