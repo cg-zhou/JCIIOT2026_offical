@@ -451,6 +451,43 @@ def _get_ollama_url() -> str:
     return st.session_state.get("_ollama_url", "") or os.getenv("OLLAMA_BASE_URL", DEFAULT_OLLAMA_BASE_URL)
 
 
+def _detect_vision_config_for_sidebar() -> dict:
+    """Return VLM config dict from current sidebar VLM fields or backend fallback."""
+    _vlm_url = st.session_state.get("_vlm_api_url", "")
+    _vlm_key = st.session_state.get("_vlm_api_key", "")
+    _vlm_model = st.session_state.get("_vlm_model", "")
+
+    if _vlm_url:
+        from robot_agent.core.vision_client import _detect_api_type
+        return {
+            "base_url": _vlm_url,
+            "model": _vlm_model or DEFAULT_VISION_MODEL,
+            "api_type": "openai" if _vlm_key else _detect_api_type(_vlm_url),
+            "api_key": _vlm_key,
+        }
+
+    _backend = st.session_state.get("_llm_backend", "ollama")
+    if _backend == "openai":
+        return {
+            "base_url": st.session_state.get(
+                "_openai_base_url",
+                os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+            ),
+            "model": _vlm_model or "gpt-4o",
+            "api_type": "openai",
+            "api_key": st.session_state.get(
+                "_openai_api_key",
+                os.getenv("OPENAI_API_KEY", ""),
+            ),
+        }
+    return {
+        "base_url": _get_ollama_url(),
+        "model": _vlm_model or DEFAULT_VISION_MODEL,
+        "api_type": "ollama",
+        "api_key": "",
+    }
+
+
 def _record_active_backend() -> None:
     """Record the currently selected backend + model in session state for display."""
     _backend = st.session_state.get("_llm_backend", "ollama")
@@ -797,9 +834,12 @@ def render_sidebar() -> None:
                 with st.sidebar, st.spinner("Reading document + VLM analysis..."):
                     from robot_agent.skills.read_document import ReadDocumentSkill
                     from robot_agent.core.types import ExecutionContext
+                    _vlm_cfg = _detect_vision_config_for_sidebar()
                     skill = ReadDocumentSkill(
-                        ollama_base_url=_get_ollama_url(),
-                        vision_model=DEFAULT_VISION_MODEL,
+                        ollama_base_url=_vlm_cfg["base_url"],
+                        vision_model=_vlm_cfg["model"],
+                        api_type=_vlm_cfg["api_type"],
+                        api_key=_vlm_cfg["api_key"],
                     )
                     ctx = ExecutionContext(task="test", metadata={
                         "inputs": {"file": str(_docx_path), "use_vision": _use_vlm}
@@ -838,10 +878,9 @@ def render_sidebar() -> None:
             "python robosuite/robosuite/environments/factory_sorting/get_map.py"
         )
 
-    # Vision model test
     st.sidebar.divider()
-    st.sidebar.subheader("Vision Model Test")
-    _render_vision_test()
+    st.sidebar.subheader("Vision Model (VLM)")
+    _render_vlm_section()
 
 
     # 鈹€鈹€ Grasp test 鈹€鈹€
@@ -942,21 +981,94 @@ def _render_grasp_test() -> None:
         st.session_state["_grasp_test_output"] = ""
 
 
-def _render_vision_test() -> None:
-    """Sidebar: test vision model by describing the current simulation view."""
-    # Configuration for vision model
-    vision_model = st.sidebar.text_input(
-        "Model Name", value=DEFAULT_VISION_MODEL, key="vision_model",
-        label_visibility="collapsed",
-    )
+def _render_vlm_section() -> None:
+    """Sidebar: VLM configuration, status, and test button."""
 
-    if st.sidebar.button("Test Visual Recognition", use_container_width=True):
+    # ── Auto-detect default URL from active LLM backend ──
+    _backend = st.session_state.get("_llm_backend", "ollama")
+    if _backend == "openai":
+        _default_url = st.session_state.get(
+            "_openai_base_url",
+            os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+        )
+        _default_key = st.session_state.get(
+            "_openai_api_key",
+            os.getenv("OPENAI_API_KEY", ""),
+        )
+        _default_model = "gpt-4o"
+    else:
+        _default_url = _get_ollama_url()
+        _default_key = ""
+        _default_model = DEFAULT_VISION_MODEL
+
+    # ── VLM API configuration (independent of text LLM backend) ──
+    st.sidebar.caption("VLM API Configuration")
+
+    _vlm_url = st.sidebar.text_input(
+        "VLM Base URL",
+        value=st.session_state.get("_vlm_api_url", _default_url),
+        key="_vlm_api_url_input",
+        placeholder=_default_url,
+        label_visibility="visible",
+    )
+    if _vlm_url:
+        st.session_state["_vlm_api_url"] = _vlm_url
+
+    _vlm_key = st.sidebar.text_input(
+        "VLM API Key",
+        value=st.session_state.get("_vlm_api_key", _default_key),
+        key="_vlm_api_key_input",
+        type="password",
+        placeholder="sk-... (leave empty for Ollama)",
+        label_visibility="visible",
+    )
+    if _vlm_key:
+        st.session_state["_vlm_api_key"] = _vlm_key
+
+    _vlm_model = st.sidebar.text_input(
+        "VLM Model",
+        value=st.session_state.get("_vlm_model", _default_model),
+        key="_vlm_model_input",
+        placeholder=_default_model,
+        label_visibility="visible",
+    )
+    if _vlm_model:
+        st.session_state["_vlm_model"] = _vlm_model
+
+    # ── Detect API type ──
+    from robot_agent.core.vision_client import _detect_api_type
+    _vlm_api_type = _detect_api_type(_vlm_url)
+    if _vlm_key:
+        _vlm_api_type = "openai"
+
+    # ── Status indicator ──
+    _vlm_status = st.session_state.get("_vlm_conn_status", "unknown")
+    _vlm_msg = st.session_state.get("_vlm_conn_msg", "")
+    if _vlm_status == "ok":
+        st.sidebar.success(f"VLM: {_vlm_msg}" if _vlm_msg else "VLM: Connected")
+    elif _vlm_status == "fail":
+        st.sidebar.error(f"VLM: {_vlm_msg}" if _vlm_msg else "VLM: Disconnected")
+    else:
+        st.sidebar.caption("VLM Status: not tested")
+
+    # ── Show last test result ──
+    _last_img = st.session_state.get("_vlm_test_image")
+    _last_resp = st.session_state.get("_vlm_test_response")
+    if _last_img is not None and _last_resp is not None:
+        st.sidebar.image(_last_img, caption="Factory Scene — Birdview",
+                         use_container_width=True)
+        st.sidebar.caption(_last_resp[:500])
+
+    # ── Test button ──
+    if st.sidebar.button("Test VLM with Factory Scene", use_container_width=True,
+                          help="Load factory birdview → VLM describes the scene"):
         with st.sidebar:
-            with st.spinner("Loading simulation + calling vision model..."):
+            with st.spinner(f"Loading factory scene + testing VLM ({_vlm_api_type})..."):
                 try:
                     from robot_agent.environments import RobosuiteBackend
+                    from robot_agent.core.vision_client import ask_vision
+                    from PIL import Image
 
-                    # Start simulation
                     backend = RobosuiteBackend(
                         env_name="FactorySorting1_3FO3ERFHISEM",
                         camera="birdview",
@@ -966,39 +1078,37 @@ def _render_vision_test() -> None:
                     frame = backend.capture_frame()
                     backend.close()
 
-                    # Encode frame as base64 JPEG
-                    import base64
-                    from PIL import Image
                     img = Image.fromarray(frame)
                     buf = io.BytesIO()
                     img.save(buf, format="JPEG", quality=80)
-                    b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
 
-                    # Call Ollama vision API
-                    import urllib.request as _req
-                    api_url = f"{_get_ollama_url().rstrip('/')}/api/generate"
-                    payload = json.dumps({
-                        "model": vision_model,
-                        "prompt": "Describe this factory scene in English. What do you see? Tables, conveyors, robot, crates? Keep it under 100 words.",
-                        "images": [b64],
-                        "stream": False,
-                    }).encode("utf-8")
-                    r = _req.Request(api_url, data=payload,
-                                     headers={"Content-Type": "application/json"},
-                                     method="POST")
-                    with _req.urlopen(r, timeout=120) as resp:
-                        result = json.loads(resp.read().decode("utf-8"))
-
-                    response = result.get("response", "")
-                    if not response:
-                        # qwen models put thinking in "thinking" field
-                        response = result.get("thinking", "") or "(empty response)"
-
-                    st.success("Vision model connected")
-                    st.caption(response[:500])
-
+                    response = ask_vision(
+                        "Describe this factory scene from a top-down birdview. "
+                        "What do you see? Tables, conveyors, stations, robot, "
+                        "production lines? Keep it under 100 words.",
+                        buf.getvalue(),
+                        base_url=_vlm_url,
+                        model=_vlm_model,
+                        api_type=_vlm_api_type,
+                        api_key=_vlm_key,
+                        timeout=120.0,
+                    )
+                    st.session_state["_vlm_conn_status"] = "ok"
+                    st.session_state["_vlm_conn_msg"] = response[:80]
+                    st.session_state["_vlm_test_image"] = frame
+                    st.session_state["_vlm_test_response"] = response
+                    st.rerun()
                 except Exception as exc:
-                    st.error(f"Vision test failed: {exc}")
+                    st.session_state["_vlm_conn_status"] = "fail"
+                    st.session_state["_vlm_conn_msg"] = str(exc)[:100]
+                    st.session_state["_vlm_test_image"] = None
+                    st.session_state["_vlm_test_response"] = None
+                    st.rerun()
+
+
+def _render_vision_test() -> None:
+    """Legacy sidebar: test vision model (kept for backward compatibility)."""
+    _render_vlm_section()
 
 
 def render_quick_actions() -> None:
@@ -2366,6 +2476,17 @@ def _run_task_in_mujoco_process(task: str, task_index: int, *, update_score: boo
         child_env["LOCAL_LLM_MODEL"] = ""
         child_env["OPENAI_API_KEY"] = ""
         child_env["GLM_API_KEY"] = ""
+
+    # ── Pass VLM sidebar settings to subprocess ──
+    _vlm_url = st.session_state.get("_vlm_api_url", "")
+    _vlm_key = st.session_state.get("_vlm_api_key", "")
+    _vlm_model = st.session_state.get("_vlm_model", "")
+    if _vlm_url:
+        child_env["VLM_BASE_URL"] = _vlm_url
+    if _vlm_key:
+        child_env["VLM_API_KEY"] = _vlm_key
+    if _vlm_model:
+        child_env["VLM_MODEL"] = _vlm_model
 
     # Use a real log file instead of PIPE. Streamlit reruns can lose the
     # Popen object; if stdout/stderr are pipes, the child may crash when it

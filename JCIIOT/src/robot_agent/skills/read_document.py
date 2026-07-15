@@ -26,6 +26,8 @@ class ReadDocumentSkill(BaseSkill):
         *,
         ollama_base_url: str = "http://localhost:11434",
         vision_model: str = "qwen3-vl:8b",
+        api_type: str = "ollama",
+        api_key: str = "",
     ) -> None:
         super().__init__(
             name="read_document",
@@ -34,6 +36,8 @@ class ReadDocumentSkill(BaseSkill):
         )
         self._ollama_url = ollama_base_url
         self._vision_model = vision_model
+        self._api_type = api_type
+        self._api_key = api_key
 
     def run(self, context: ExecutionContext) -> SkillResult:
         file_path = context.metadata.get("inputs", {}).get("file", "")
@@ -75,6 +79,8 @@ class ReadDocumentSkill(BaseSkill):
                                 img_data,
                                 base_url=self._ollama_url,
                                 model=self._vision_model,
+                                api_type=self._api_type,
+                                api_key=self._api_key,
                             )
                             img_descriptions[name] = desc
                         except Exception as exc:
