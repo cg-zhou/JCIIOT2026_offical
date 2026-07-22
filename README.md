@@ -1,3 +1,6 @@
+## Notice
+An erratum for the  SOP materials is available in [ERRATUM.md](./ERRATUM.md). Please refer to it for the latest corrections and clarifications.
+
 ## Repository Structure and Leaderboard
 
 - The **Competition Description** section contains the problem statement and task description for this competition.
